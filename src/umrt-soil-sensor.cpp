@@ -4,27 +4,30 @@
 
 #include <Arduino.h>
 #include "driver/twai.h"
+#include "umrt-soil-sensor.hpp"
 
-uint8_t Com[8] = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x04, 0x44, 0x09 };
-float tem, hum, ph;
-int ec;
+// Constructor
+SoilSensor::SoilSensor(uint8_t de_pin, uint8_t serial_tx_pin, uint8_t serial_rx_pin)
+  : serial_de_pin(de_pin), serial_tx_pin(serial_tx_pin), serial_rx_pin(serial_rx_pin),
+    tem(0), hum(0), ph(0), ec(0) {
+}
 
-#define RS485_DE_PIN 4
-#define RS485_TXMODE HIGH
-#define RS485_RXMODE LOW
+void SoilSensor::begin() {
+  Serial2.begin(9600, SERIAL_8N1, serial_rx_pin, serial_tx_pin);
+  if (serial_de_pin >= 0) {
+    pinMode(serial_de_pin, OUTPUT);
+    digitalWrite(serial_de_pin, RS485_RXMODE);
+  }
+}
 
-#define CAN_TX_PIN GPIO_NUM_5
-#define CAN_RX_PIN GPIO_NUM_21   
-#define CAN_ID     0x18FFEB00
+SoilSensor sensor(RS485_DE_PIN_DEFAULT, 17, 16); // dePin, serialTxPin(GPIO17), serialRxPin(GPIO16)
+
+void sendCANFrame();
+void printTWAIStatus();
 
 void setup() {
-  Serial.begin(115200); 
-  Serial2.begin(9600, SERIAL_8N1, 16, 17); 
-
-  if (RS485_DE_PIN >= 0) { 
-    pinMode(RS485_DE_PIN, OUTPUT);
-    digitalWrite(RS485_DE_PIN, RS485_RXMODE);
-  }
+  Serial.begin(115200);
+  sensor.begin();
 
   //configure and start TWAI driver
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
@@ -43,26 +46,26 @@ void setup() {
 }
 
 void loop() {
-  readHumitureECPH(); //read sensor data from RS485
+  sensor.readSensorData(); //read sensor data from RS485
 
-  Serial.print("TEM = "); Serial.print(tem, 1);
-  Serial.print(" HUM = "); Serial.print(hum, 1);
-  Serial.print(" EC = "); Serial.print(ec);
-  Serial.print(" PH = "); Serial.println(ph, 1);
+  Serial.print("TEM = "); Serial.print(sensor.getTemperature(), 1);
+  Serial.print(" HUM = "); Serial.print(sensor.getHumidity(), 1);
+  Serial.print(" EC = "); Serial.print(sensor.getEC());
+  Serial.print(" PH = "); Serial.println(sensor.getPH(), 1);
 
   sendCANFrame(); //pack and send CAN frame with sensor readings
 
-  printTWAIStatus(); // shows error counters and error state for frame 
+  printTWAIStatus(); // shows error counters and error state for frame
 
   delay(1000);
 }
 
 void sendCANFrame() {
-  
-  int16_t tem_i = (int16_t)(tem * 10);
-  int16_t hum_i = (int16_t)(hum * 10);
-  int16_t ec_i  = (int16_t)(ec  * 10);
-  int16_t ph_i  = (int16_t)(ph  * 10);
+
+  int16_t tem_i = (int16_t)(sensor.getTemperature() * 10);
+  int16_t hum_i = (int16_t)(sensor.getHumidity() * 10);
+  int16_t ec_i  = (int16_t)(sensor.getEC()  * 10);
+  int16_t ph_i  = (int16_t)(sensor.getPH()  * 10);
 
   twai_message_t message;
   message.identifier = CAN_ID;
@@ -70,7 +73,7 @@ void sendCANFrame() {
   message.rtr = 0;
   message.data_length_code = 8;
 
-  //little-endian 
+  //little-endian
   //pack CAN frame data
   message.data[0] = tem_i & 0xFF;
   message.data[1] = (tem_i >> 8) & 0xFF;
@@ -98,16 +101,16 @@ void printTWAIStatus() {
                 status.msgs_to_tx, status.bus_error_count);
 }
 
-void readHumitureECPH(void) {
+void SoilSensor::readSensorData(void) {
   uint8_t Data[13] = { 0 };
-  bool flag = 1;
+  bool flag = true;
 
-  while (flag) { //loop until valid response received 
+  while (flag) { //loop until valid response received
     delay(100);
-    if (RS485_DE_PIN >= 0) digitalWrite(RS485_DE_PIN, RS485_TXMODE);
+    if (serial_de_pin >= 0) digitalWrite(serial_de_pin, RS485_TXMODE);
     Serial2.write(Com, 8);
     Serial2.flush();
-    if (RS485_DE_PIN >= 0) digitalWrite(RS485_DE_PIN, RS485_RXMODE);
+    if (serial_de_pin >= 0) digitalWrite(serial_de_pin, RS485_RXMODE);
 
     delay(50);
     uint8_t n = readN(Data, 13);
@@ -117,14 +120,14 @@ void readHumitureECPH(void) {
       tem = (Data[5] * 256 + Data[6]) / 10.00;
       ec  = Data[7] * 256 + Data[8];
       ph  = (Data[9] * 256 + Data[10]) / 10.00;
-      flag = 0;
+      flag = false;
     }
     while (Serial2.available()) Serial2.read();
   }
 }
 
 //helper function to read a specified number of bytes from Serial2 with a timeout
-uint8_t readN(uint8_t *buf, size_t len) { 
+uint8_t SoilSensor::readN(uint8_t *buf, size_t len) {
   size_t offset = 0, left = len;
   long curr = millis();
   while (left) {
@@ -136,8 +139,9 @@ uint8_t readN(uint8_t *buf, size_t len) {
   }
   return offset;
 }
+
 //process received data and calculate CRC16
-unsigned int CRC16_2(unsigned char *buf, int len) { 
+unsigned int SoilSensor::CRC16_2(unsigned char *buf, int len) {
   unsigned int crc = 0xFFFF;
   for (int pos = 0; pos < len; pos++) {
     crc ^= (unsigned int)buf[pos];
